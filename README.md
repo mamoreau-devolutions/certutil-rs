@@ -21,16 +21,41 @@ Default `cargo test` stays offline. To run the live **devolutions.net** check (T
 cargo test -- --ignored --nocapture devolutions_net_https_leaf_validates
 ```
 
+**Parity with `certutil.exe -verify`** (prefetches the leaf via **`tls fetch`**, then runs both tools on the same `.cer`):
+
+```powershell
+cargo test --test parity_certutil_verify -- --ignored --nocapture
+```
+
+Requires **`certutil.exe`** on `PATH` (typically `%SystemRoot%\System32`).
+
 ## Usage
 
 ```text
 certutil-rs -dump <INFILE>
-certutil-rs -verify <CRTBLOB>
+certutil-rs -verify [--urlfetch] [-t MS] [--ssl-dns-name DNS] <CRTBLOB>
+certutil-rs -URL <InFile | URL> [-t MS]
+certutil-rs tls fetch <HOST> -o <PATH> [--port PORT] [--server-name NAME] [--insecure] [--format pem|der]
 ```
 
 `-dump` accepts PEM (`-----BEGIN CERTIFICATE-----`) or DER.
 
-`-verify` loads the encoded cert, calls **`CertGetCertificateChain`** (with revocation checking on the chain, excluding the root) and **`CertVerifyCertificateChainPolicy`** with **`CERT_CHAIN_POLICY_BASE`**, then prints trust status and chain elements. This is a diagnostic baseline, not a byte-for-byte match to every `certutil -verify` flag yet.
+`-verify` loads the encoded cert, calls **`CertGetCertificateChain`** (with revocation checking on the chain, excluding the root) and **`CertVerifyCertificateChainPolicy`** with **`CERT_CHAIN_POLICY_BASE`**, then prints trust status and chain elements. Options **`--urlfetch`** and **`-t`** mirror `certutil` URL retrieval behavior for chain building. **`--ssl-dns-name`** runs an additional **`CERT_CHAIN_POLICY_SSL`** check with that DNS name (certutil-rs extension).
+
+`-URL` uses **`CryptRetrieveObjectByUrl`** for HTTP(S) certificate/CRL retrieval diagnostics.
+
+### TLS fetch (certutil-rs extension)
+
+Use **`tls fetch`** to perform a client TLS handshake and write the **peer leaf certificate** to disk (PEM or DER), without scripting OpenSSL or PowerShell first. Output format follows the file extension (`.pem`/`.crt` vs `.der`/`.cer`) unless **`--format`** is set. **`--server-name`** sets SNI and TLS hostname verification (defaults to the host part of **`HOST`**). **`--insecure`** disables certificate validation (diagnostics only).
+
+Parity check with **`certutil.exe`** on the saved file:
+
+```powershell
+certutil-rs tls fetch example.com -o leaf.pem
+certutil.exe -verify leaf.pem
+```
+
+For IPv6 or non-default ports, use bracket form or **`--port`** (see **`certutil-rs tls fetch --help`**).
 
 ## Reversing artifacts
 

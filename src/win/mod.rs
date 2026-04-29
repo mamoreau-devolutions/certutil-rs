@@ -3,5 +3,7 @@
 pub mod dump;
 pub mod encoding;
 pub mod names;
+pub mod tls_fetch;
 pub mod url;
+mod verify_format;
 pub mod verify;

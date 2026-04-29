@@ -61,17 +61,7 @@ pub fn dump_cert_bytes(der: &[u8]) -> Result<String> {
         }
         let _free = FreeCertContext(ctx);
 
-        let mut cb_hash: u32 = 0;
-        CertGetCertificateContextProperty(ctx, CERT_HASH_PROP_ID, None, &mut cb_hash)?;
-        let mut hash_buf = vec![0u8; cb_hash as usize];
-        CertGetCertificateContextProperty(
-            ctx,
-            CERT_HASH_PROP_ID,
-            Some(hash_buf.as_mut_ptr().cast()),
-            &mut cb_hash,
-        )?;
-        hash_buf.truncate(cb_hash as usize);
-        let thumbprint = sha1_thumbprint_from_prop(&hash_buf)?;
+        let thumbprint = cert_sha1_thumbprint_bytes(ctx)?;
 
         let subject = cert_simple_display_name(ctx, false)?;
         let issuer = cert_simple_display_name(ctx, true)?;
@@ -96,6 +86,24 @@ impl Drop for FreeCertContext {
             let _ = CertFreeCertificateContext(Some(self.0));
         }
     }
+}
+
+/// SHA-1 thumbprint bytes via [`CERT_HASH_PROP_ID`] (shared with verify formatting).
+///
+/// # Safety
+/// `ctx` must be a valid `PCCERT_CONTEXT` for the duration of the call.
+pub(super) unsafe fn cert_sha1_thumbprint_bytes(ctx: *const windows::Win32::Security::Cryptography::CERT_CONTEXT) -> Result<[u8; 20]> {
+    let mut cb_hash: u32 = 0;
+    CertGetCertificateContextProperty(ctx, CERT_HASH_PROP_ID, None, &mut cb_hash)?;
+    let mut hash_buf = vec![0u8; cb_hash as usize];
+    CertGetCertificateContextProperty(
+        ctx,
+        CERT_HASH_PROP_ID,
+        Some(hash_buf.as_mut_ptr().cast()),
+        &mut cb_hash,
+    )?;
+    hash_buf.truncate(cb_hash as usize);
+    sha1_thumbprint_from_prop(&hash_buf)
 }
 
 /// `CERT_HASH_PROP_ID` returns a [`CERT_HASH`](https://learn.microsoft.com/windows/win32/api/wincrypt/ns-wincrypt-cert_hash)-style blob.

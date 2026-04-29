@@ -11,7 +11,7 @@ The user goal is **support-style diagnosis** on customer machines (trust stores,
 ## Platform
 
 - **Target:** Windows only. Use **`windows-msvc`** and the **`windows`** / **`windows-core`** crates for FFI.
-- Do **not** add Linux/macOS code paths, portable TLS stacks for chain verification, or `#[cfg(unix)]` shims in the core validation paths. Test helpers may use dev-dependencies (for example **`native-tls`** only to **fetch** a leaf cert in integration tests); **trust and policy evaluation** stay on **CryptoAPI/Schannel-related Win32 APIs**.
+- Do **not** add Linux/macOS code paths or `#[cfg(unix)]` shims in the core validation paths. **`tls fetch`** uses **`native-tls`** (Schannel on Windows) only to **perform the TLS handshake and export the leaf certificate**; **trust and policy evaluation** for **`-verify`** stay on **CryptoAPI** (`CertGetCertificateChain`, `CertVerifyCertificateChainPolicy`).
 
 If a contributor needs non-Windows CI, keep it limited to **metadata /fmt / no-compile** checks—do not pretend to validate Windows trust off-platform.
 
@@ -23,7 +23,7 @@ If a contributor needs non-Windows CI, keep it limited to **metadata /fmt / no-c
 
 ## Scope boundaries
 
-- **In scope:** Read-only diagnostics—**`-dump`**, **`-verify`**, URL/cache-style flows used for **CRL/CDP/OCSP** troubleshooting, and read-only store **view/list** modes if they match certutil’s non-mutating behavior.
+- **In scope:** Read-only diagnostics—**`-dump`**, **`-verify`**, URL/cache-style flows used for **CRL/CDP/OCSP** troubleshooting, **`tls fetch`** (export leaf certs from live TLS for parity with **`certutil.exe -verify`** on files), and read-only store **view/list** modes if they match certutil’s non-mutating behavior.
 - **Out of scope unless explicitly requested:** Commands that **install/remove/repair** certs or stores, publish to AD, or otherwise **mutate** machine crypto state. Do not add hidden flags that write to stores.
 
 ## Code organization (current)
