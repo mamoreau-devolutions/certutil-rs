@@ -7,6 +7,7 @@ pub mod codec;
 pub mod dump;
 pub mod hashfile;
 pub mod ocsp_der;
+pub mod tls_names;
 pub mod store_view;
 pub mod encoding;
 pub mod names;

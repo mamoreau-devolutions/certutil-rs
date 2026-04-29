@@ -11,6 +11,8 @@ use base64::Engine;
 use schannel::schannel_cred::{Direction, SchannelCred};
 use schannel::tls_stream::{Builder as TlsBuilder, HandshakeError};
 
+use super::tls_names::{describe_ai_cipher, describe_dw_protocol};
+
 /// Split `host:port` when `port` is numeric after the last colon; support `[IPv6]:port`.
 pub fn split_host_and_port(input: &str, default_port: u16) -> Result<(String, u16)> {
     let input = input.trim();
@@ -148,17 +150,22 @@ fn fetch_tls_inner(
         match tls.connection_info() {
             Ok(ci) => {
                 lines.push_str(&format!(
-                    "  TLS protocol (dwProtocol): 0x{:08x}\r\n",
-                    ci.dwProtocol
+                    "  TLS protocol (dwProtocol): 0x{:08x} — {}\r\n",
+                    ci.dwProtocol,
+                    describe_dw_protocol(ci.dwProtocol)
                 ));
                 lines.push_str(&format!(
-                    "  Cipher ALG_ID (aiCipher): {}\r\n",
-                    ci.aiCipher
+                    "  Cipher ALG_ID (aiCipher): {} — {}\r\n",
+                    ci.aiCipher,
+                    describe_ai_cipher(ci.aiCipher)
                 ));
                 lines.push_str(&format!(
                     "  Cipher strength (bits): {}\r\n",
                     ci.dwCipherStrength
                 ));
+                lines.push_str(
+                    "  Schannel fields reference: https://learn.microsoft.com/en-us/windows/win32/api/schannel/ns-schannel-secpkgcontext_connectioninfo\r\n",
+                );
             }
             Err(e) => lines.push_str(&format!(
                 "  Schannel connection info (QueryContextAttributes): {e}\r\n"

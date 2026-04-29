@@ -21,8 +21,8 @@ use super::cert_hash::cert_sha1_thumbprint_bytes;
 use super::encoding::CERT_ENCODING;
 use super::names::cert_simple_display_name;
 use super::cert_extensions::{
-    basic_constraints_block, enhanced_key_usage_block, key_usage_block, name_blob_to_display,
-    name_blob_to_rdn_comma, public_key_summary_line,
+    basic_constraints_block, certificate_policies_block, enhanced_key_usage_block, key_usage_block,
+    name_blob_to_display, name_blob_to_rdn_comma, public_key_summary_line,
 };
 use super::verify_format::{
     authority_info_access_block, cdp_distribution_points_block, cert_rdn_comma,
@@ -143,6 +143,9 @@ unsafe fn dump_certificate_context(ctx: *const CERT_CONTEXT) -> Result<String> {
     }
     if let Some(eku) = enhanced_key_usage_block(ctx) {
         out.push_str(&eku);
+    }
+    if let Some(cp) = certificate_policies_block(ctx) {
+        out.push_str(&cp);
     }
     if let Some(san) = subject_alt_name_block(ctx) {
         out.push_str(&san);

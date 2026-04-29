@@ -22,7 +22,8 @@ use super::encoding::CERT_ENCODING;
 use super::names::cert_simple_display_name;
 use super::url::{format_retrieval_probes_for_chain, DEFAULT_URL_TIMEOUT_MS};
 use super::cert_extensions::{
-    basic_constraints_block, enhanced_key_usage_block, key_usage_block, public_key_summary_line,
+    basic_constraints_block, certificate_policies_block, enhanced_key_usage_block, key_usage_block,
+    public_key_summary_line,
 };
 use super::verify_format::{
     authority_info_access_block, cdp_distribution_points_block, cert_rdn_comma,
@@ -538,6 +539,9 @@ unsafe fn append_leaf_certificate_section(
     }
     if let Some(eku) = enhanced_key_usage_block(leaf) {
         out.push_str(&eku);
+    }
+    if let Some(cp) = certificate_policies_block(leaf) {
+        out.push_str(&cp);
     }
     if let Some(san) = subject_alt_name_block(leaf) {
         out.push_str(&san);

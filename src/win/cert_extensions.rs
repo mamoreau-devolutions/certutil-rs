@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
 use anyhow::Result;
-use der_parser::ber::BerObjectContent;
+use der_parser::ber::{BerObject, BerObjectContent, Class};
 use der_parser::oid::Oid;
 use der_parser::parse_der;
 use windows::Win32::Security::Cryptography::{
@@ -12,7 +12,8 @@ use windows::Win32::Security::Cryptography::{
     CryptDecodeObject, CERT_BASIC_CONSTRAINTS2_INFO, CERT_CONTEXT, CERT_EXTENSION,
     CERT_NAME_RDN_TYPE, CERT_NAME_SIMPLE_DISPLAY_TYPE, CRYPT_BIT_BLOB,
     CRYPT_INTEGER_BLOB,
-    szOID_BASIC_CONSTRAINTS2, szOID_ENHANCED_KEY_USAGE, X509_BASIC_CONSTRAINTS2,
+    szOID_BASIC_CONSTRAINTS2, szOID_CERT_POLICIES, szOID_ENHANCED_KEY_USAGE,
+    X509_BASIC_CONSTRAINTS2,
 };
 
 use super::encoding::CERT_ENCODING;
@@ -79,6 +80,109 @@ pub(crate) unsafe fn enhanced_key_usage_block(ctx: *const CERT_CONTEXT) -> Optio
     let mut out = String::from("  Enhanced Key Usage:\r\n");
     for oid in oids {
         out.push_str(&format!("    {oid}\r\n"));
+    }
+    Some(out)
+}
+
+/// CPS qualifier OID (`id-qt-cps`).
+const OID_PKIX_QUALIFIER_CPS: &str = "1.3.6.1.5.5.7.2.1";
+/// User notice qualifier OID (`id-qt-unotice`).
+const OID_PKIX_QUALIFIER_UNOTICE: &str = "1.3.6.1.5.5.7.2.2";
+
+fn stringish_qualifier(o: &BerObject<'_>) -> Option<String> {
+    match &o.content {
+        BerObjectContent::IA5String(s) => Some(s.to_string()),
+        BerObjectContent::UTF8String(s) => Some(s.to_string()),
+        BerObjectContent::PrintableString(s) => Some(s.to_string()),
+        BerObjectContent::VisibleString(s) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+fn append_policy_qualifiers(quals_wrap: &BerObject<'_>, out: &mut String, indent: &str) {
+    let quals_inner = match &quals_wrap.content {
+        BerObjectContent::Tagged(cls, tag, inner)
+            if *cls == Class::ContextSpecific && tag.0 == 0 =>
+        {
+            inner.as_ref()
+        }
+        BerObjectContent::Sequence(_) => quals_wrap,
+        _ => return,
+    };
+    let quals_list = match &quals_inner.content {
+        BerObjectContent::Sequence(q) => q,
+        _ => return,
+    };
+    for q in quals_list {
+        let BerObjectContent::Sequence(parts) = &q.content else {
+            continue;
+        };
+        if parts.len() < 2 {
+            continue;
+        }
+        let qid = match &parts[0].content {
+            BerObjectContent::OID(oid) => oid_to_string(oid),
+            _ => continue,
+        };
+        let body = &parts[1];
+        if qid == OID_PKIX_QUALIFIER_CPS {
+            if let Some(s) = stringish_qualifier(body) {
+                out.push_str(&format!("{indent}  CPS: {s}\r\n"));
+            }
+        } else if qid == OID_PKIX_QUALIFIER_UNOTICE {
+            out.push_str(&format!(
+                "{indent}  UserNotice: present (OID {qid}; display optional)\r\n"
+            ));
+        } else {
+            out.push_str(&format!("{indent}  Qualifier OID: {qid}\r\n"));
+        }
+    }
+}
+
+/// Certificate Policies (`2.5.29.32`): policy OIDs and CPS / notice qualifiers when DER parses cleanly.
+///
+/// # Safety
+/// `ctx` must be a valid `PCCERT_CONTEXT`.
+pub(crate) unsafe fn certificate_policies_block(ctx: *const CERT_CONTEXT) -> Option<String> {
+    let info = &*(*ctx).pCertInfo;
+    if info.cExtension == 0 || info.rgExtension.is_null() {
+        return None;
+    }
+    let exts: &[CERT_EXTENSION] =
+        std::slice::from_raw_parts(info.rgExtension, info.cExtension as usize);
+    let ext_ptr = CertFindExtension(szOID_CERT_POLICIES, exts);
+    if ext_ptr.is_null() {
+        return None;
+    }
+    let ext = &*ext_ptr;
+    if ext.Value.cbData == 0 || ext.Value.pbData.is_null() {
+        return None;
+    }
+    let enc = std::slice::from_raw_parts(ext.Value.pbData, ext.Value.cbData as usize);
+    let (_, obj) = parse_der(enc).ok()?;
+    let policies = match &obj.content {
+        BerObjectContent::Sequence(seq) => seq,
+        _ => return None,
+    };
+    if policies.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("  Certificate Policies:\r\n");
+    let indent = "    ";
+    for pol in policies {
+        let seq = match &pol.content {
+            BerObjectContent::Sequence(s) => s,
+            _ => continue,
+        };
+        let policy_oid = match seq.first().map(|o| &o.content) {
+            Some(BerObjectContent::OID(oid)) => oid_to_string(oid),
+            _ => continue,
+        };
+        out.push_str(&format!("{indent}Policy Identifier: {policy_oid}\r\n"));
+        if seq.len() >= 2 {
+            append_policy_qualifiers(&seq[1], &mut out, indent);
+        }
     }
     Some(out)
 }
