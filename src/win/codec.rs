@@ -6,8 +6,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use windows::Win32::Security::Cryptography::{
-    CryptBinaryToStringW, CryptStringToBinaryW, CRYPT_STRING_ANY, CRYPT_STRING_BASE64HEADER,
-    CRYPT_STRING_HEXRAW,
+    CryptBinaryToStringW, CryptStringToBinaryW, CRYPT_STRING_ANY, CRYPT_STRING_BASE64,
+    CRYPT_STRING_BASE64HEADER, CRYPT_STRING_HEXRAW,
 };
 
 /// Decode PEM or hex/base64 blob file to raw bytes.
@@ -36,15 +36,27 @@ pub fn decode_file(path: &Path) -> Result<Vec<u8>> {
 #[derive(Clone, Copy, Debug)]
 pub enum EncodeFormat {
     Hex,
+    HexSpaced,
     Base64Pem,
+    Base64Raw,
 }
 
 pub fn encode_file(path: &Path, fmt: EncodeFormat) -> Result<String> {
     let raw = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if matches!(fmt, EncodeFormat::HexSpaced) {
+        let s: String = raw
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Ok(format!("{s}\r\n"));
+    }
     unsafe {
         let flags = match fmt {
             EncodeFormat::Hex => CRYPT_STRING_HEXRAW,
+            EncodeFormat::HexSpaced => unreachable!("handled above"),
             EncodeFormat::Base64Pem => CRYPT_STRING_BASE64HEADER,
+            EncodeFormat::Base64Raw => CRYPT_STRING_BASE64,
         };
         let mut cch: u32 = 0;
         CryptBinaryToStringW(raw.as_slice(), flags, None, &mut cch).ok()?;

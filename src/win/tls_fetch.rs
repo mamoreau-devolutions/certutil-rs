@@ -145,6 +145,25 @@ fn fetch_tls_inner(
                 "  Certificates in peer message store (leaf + intermediates): {n}\r\n"
             ));
         }
+        match tls.connection_info() {
+            Ok(ci) => {
+                lines.push_str(&format!(
+                    "  TLS protocol (dwProtocol): 0x{:08x}\r\n",
+                    ci.dwProtocol
+                ));
+                lines.push_str(&format!(
+                    "  Cipher ALG_ID (aiCipher): {}\r\n",
+                    ci.aiCipher
+                ));
+                lines.push_str(&format!(
+                    "  Cipher strength (bits): {}\r\n",
+                    ci.dwCipherStrength
+                ));
+            }
+            Err(e) => lines.push_str(&format!(
+                "  Schannel connection info (QueryContextAttributes): {e}\r\n"
+            )),
+        }
         lines.push_str("\r\n");
         Some(lines)
     } else {

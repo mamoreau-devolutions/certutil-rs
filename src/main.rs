@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use certutil_rs::cli::{Cli, Command, EncodeCliFmt, TlsAction};
+use certutil_rs::cli::{Cli, Command, EncodeCliFmt, StoreLocation, TlsAction};
 use certutil_rs::win;
 use certutil_rs::win::codec::EncodeFormat;
 use certutil_rs::win::verify::VerifyOptions;
@@ -19,6 +19,8 @@ fn main() -> Result<()> {
             ssl_client_dns_name,
             policy_authenticode,
             policy_authenticode_ts,
+            policy_basic_constraints,
+            policy_nt_auth,
             probe_urls,
             probe_revocation,
             crtblob,
@@ -32,6 +34,8 @@ fn main() -> Result<()> {
                 ssl_client_dns_name,
                 policy_authenticode,
                 policy_authenticode_ts,
+                policy_basic_constraints,
+                policy_nt_auth,
             };
             let report = win::verify::verify_cert_file_with_options(&crtblob, opts)?;
             print!("{report}");
@@ -40,10 +44,13 @@ fn main() -> Result<()> {
             infile,
             outfile,
             fmt: cli_fmt,
+            hex_spaced,
         } => {
-            let (codec_fmt, label) = match cli_fmt {
-                EncodeCliFmt::Hex => (EncodeFormat::Hex, "hex"),
-                EncodeCliFmt::Base64Pem => (EncodeFormat::Base64Pem, "base64 PEM"),
+            let (codec_fmt, label) = match (cli_fmt, hex_spaced) {
+                (EncodeCliFmt::Hex, true) => (EncodeFormat::HexSpaced, "hex spaced"),
+                (EncodeCliFmt::Hex, false) => (EncodeFormat::Hex, "hex"),
+                (EncodeCliFmt::Base64Pem, _) => (EncodeFormat::Base64Pem, "base64 PEM"),
+                (EncodeCliFmt::Base64Raw, _) => (EncodeFormat::Base64Raw, "base64"),
             };
             let text = win::codec::encode_file(&infile, codec_fmt)?;
             std::fs::write(&outfile, text.as_bytes())
@@ -67,12 +74,20 @@ fn main() -> Result<()> {
         }
         Command::Hashfile { path, alg } => {
             let alg = win::hashfile::HashAlg::parse(alg.trim())
-                .with_context(|| format!("unknown hash algorithm {alg:?} (use SHA1 or SHA256)"))?;
+                .with_context(|| format!("unknown hash algorithm {alg:?} (use MD5, SHA1, SHA256, SHA384)"))?;
             let report = win::hashfile::hash_file(&path, alg)?;
             print!("{report}");
         }
-        Command::Store { store, filter } => {
-            let report = win::store_view::view_system_store(&store, filter.as_deref())?;
+        Command::Store {
+            store,
+            location,
+            filter,
+        } => {
+            let loc = match location {
+                StoreLocation::CurrentUser => win::store_view::StoreLocationKind::CurrentUser,
+                StoreLocation::LocalMachine => win::store_view::StoreLocationKind::LocalMachine,
+            };
+            let report = win::store_view::view_system_store(&store, loc, filter.as_deref())?;
             print!("{report}");
         }
         Command::Tls { action } => match action {

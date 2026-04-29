@@ -1,5 +1,6 @@
 //! Thin wrappers around Win32 CryptoAPI/CNG entry points used by `certutil`-style tooling.
 
+pub mod cert_extensions;
 pub mod cert_hash;
 pub mod cert_urls;
 pub mod codec;

@@ -21,5 +21,9 @@ windows = { version = "0.59", features = [
 der-parser = "9"
 sha1 = "0.10"
 sha2 = "0.10"
+md5 = "0.7"
 
 [dev-dependencies]
+
+[patch.crates-io]
+schannel = { path = "vendor/schannel" }

@@ -39,6 +39,12 @@ pub enum Command {
         /// Run **Authenticode timestamping** chain policy pass (`CERT_CHAIN_POLICY_AUTHENTICODE_TS`).
         #[arg(long = "policy-authenticode-ts")]
         policy_authenticode_ts: bool,
+        /// Run **basic constraints** chain policy pass (`CERT_CHAIN_POLICY_BASIC_CONSTRAINTS`).
+        #[arg(long = "policy-basic-constraints")]
+        policy_basic_constraints: bool,
+        /// Run **NT authentication** chain policy pass (`CERT_CHAIN_POLICY_NT_AUTH`).
+        #[arg(long = "policy-nt-auth")]
+        policy_nt_auth: bool,
         /// Probe each AIA/CDP URL with **CryptRetrieveObjectByUrl** (live network; uses `-t` / default timeout).
         #[arg(long = "probe-urls")]
         probe_urls: bool,
@@ -57,6 +63,9 @@ pub enum Command {
         outfile: PathBuf,
         #[arg(long, value_enum, default_value_t = EncodeCliFmt::Base64Pem)]
         fmt: EncodeCliFmt,
+        /// Group hex as space-separated byte pairs (only with `--fmt hex`).
+        #[arg(long, default_value_t = false)]
+        hex_spaced: bool,
     },
     /// Decode PEM/base64/hex text file to binary (`certutil -decode` subset).
     #[command(name = "-decode")]
@@ -66,12 +75,12 @@ pub enum Command {
         #[arg(value_name = "OUTFILE")]
         outfile: PathBuf,
     },
-    /// Print SHA-1 or SHA-256 hash of a file (`certutil -hashfile`).
+    /// Print file digest (`certutil -hashfile`): MD5, SHA1, SHA256, or SHA384.
     #[command(name = "-hashfile")]
     Hashfile {
         #[arg(value_name = "INFILE")]
         path: PathBuf,
-        #[arg(value_name = "SHA1|SHA256")]
+        #[arg(value_name = "ALG")]
         alg: String,
     },
     /// List certificates in a system store (read-only; `certutil -store` view subset).
@@ -79,6 +88,9 @@ pub enum Command {
     Store {
         #[arg(value_name = "STORE")]
         store: String,
+        /// System store location (default: current user).
+        #[arg(long, value_enum, default_value_t = StoreLocation::CurrentUser)]
+        location: StoreLocation,
         /// Match certs whose subject or issuer contains this substring (case-insensitive).
         #[arg(long = "filter")]
         filter: Option<String>,
@@ -103,6 +115,13 @@ pub enum Command {
 pub enum EncodeCliFmt {
     Hex,
     Base64Pem,
+    Base64Raw,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum StoreLocation {
+    CurrentUser,
+    LocalMachine,
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,7 +143,7 @@ pub enum TlsAction {
         /// Disable TLS certificate (and hostname) validation (diagnostics only).
         #[arg(long)]
         insecure: bool,
-        /// Print TCP endpoints, ALPN (if probed), session resumption, and peer chain store size.
+        /// Verbose: TCP endpoints, ALPN, session resumption, peer chain store size, Schannel protocol/cipher info.
         #[arg(long)]
         verbose: bool,
         /// Force PEM or DER regardless of file extension.

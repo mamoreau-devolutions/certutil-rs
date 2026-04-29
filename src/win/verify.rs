@@ -11,16 +11,19 @@ use windows::Win32::Security::Cryptography::{
     CertCreateCertificateContext, CertFreeCertificateChain, CertFreeCertificateContext,
     CertGetCertificateChain, CertVerifyCertificateChainPolicy, CertVerifyRevocation,
     CERT_CHAIN_CONTEXT, CERT_CHAIN_ELEMENT, CERT_CHAIN_PARA, CERT_CHAIN_POLICY_AUTHENTICODE,
-    CERT_CHAIN_POLICY_AUTHENTICODE_TS, CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_FLAGS,
-    CERT_CHAIN_POLICY_PARA, CERT_CHAIN_POLICY_SSL, CERT_CHAIN_POLICY_STATUS,
-    CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT, CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
-    CERT_CONTEXT, CERT_CONTEXT_REVOCATION_TYPE, CERT_REVOCATION_PARA, CERT_REVOCATION_STATUS,
-    CERT_SIMPLE_CHAIN,
+    CERT_CHAIN_POLICY_AUTHENTICODE_TS, CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_BASIC_CONSTRAINTS,
+    CERT_CHAIN_POLICY_FLAGS, CERT_CHAIN_POLICY_NT_AUTH, CERT_CHAIN_POLICY_PARA,
+    CERT_CHAIN_POLICY_SSL, CERT_CHAIN_POLICY_STATUS, CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT,
+    CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, CERT_CONTEXT, CERT_CONTEXT_REVOCATION_TYPE,
+    CERT_REVOCATION_PARA, CERT_REVOCATION_STATUS, CERT_SIMPLE_CHAIN,
 };
 
 use super::encoding::CERT_ENCODING;
 use super::names::cert_simple_display_name;
 use super::url::{format_retrieval_probes_for_chain, DEFAULT_URL_TIMEOUT_MS};
+use super::cert_extensions::{
+    basic_constraints_block, enhanced_key_usage_block, key_usage_block, public_key_summary_line,
+};
 use super::verify_format::{
     authority_info_access_block, cdp_distribution_points_block, cert_rdn_comma,
     describe_chain_build_flags, explain_cert_trust_error_status, explain_cert_trust_info_status,
@@ -47,6 +50,10 @@ pub struct VerifyOptions {
     pub policy_authenticode: bool,
     /// Extra pass: **Authenticode timestamping** chain policy.
     pub policy_authenticode_ts: bool,
+    /// Extra pass: **basic constraints** chain policy (`CERT_CHAIN_POLICY_BASIC_CONSTRAINTS`).
+    pub policy_basic_constraints: bool,
+    /// Extra pass: **Windows NT authentication** / DC-style (`CERT_CHAIN_POLICY_NT_AUTH`).
+    pub policy_nt_auth: bool,
 }
 
 /// [`HTTPSPolicyCallbackData`](https://learn.microsoft.com/windows/win32/api/wincrypt/ns-wincrypt-httpspolicycallbackdata) — server TLS validation (`AUTHTYPE_SERVER` = 2).
@@ -139,10 +146,14 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             opts.probe_urls, opts.probe_revocation, probe_timeout_ms
         ));
         out.push_str(&format!(
-            "  ssl-client-dns-name: {:?}, policy-authenticode: {}, policy-authenticode-ts: {}\r\n\r\n",
+            "  ssl-client-dns-name: {:?}, policy-authenticode: {}, policy-authenticode-ts: {}\r\n",
             opts.ssl_client_dns_name,
             opts.policy_authenticode,
             opts.policy_authenticode_ts
+        ));
+        out.push_str(&format!(
+            "  policy-basic-constraints: {}, policy-nt-auth: {}\r\n\r\n",
+            opts.policy_basic_constraints, opts.policy_nt_auth
         ));
 
         out.push_str("CertGetCertificateChain flags:\r\n");
@@ -354,6 +365,20 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             "CERT_CHAIN_POLICY_AUTHENTICODE_TS",
             p_chain,
         )?;
+        run_optional_chain_policy(
+            &mut out,
+            opts.policy_basic_constraints,
+            CERT_CHAIN_POLICY_BASIC_CONSTRAINTS,
+            "CERT_CHAIN_POLICY_BASIC_CONSTRAINTS",
+            p_chain,
+        )?;
+        run_optional_chain_policy(
+            &mut out,
+            opts.policy_nt_auth,
+            CERT_CHAIN_POLICY_NT_AUTH,
+            "CERT_CHAIN_POLICY_NT_AUTH",
+            p_chain,
+        )?;
 
         if opts.probe_urls {
             out.push_str("\r\nRetrieval probes (CryptRetrieveObjectByUrl):\r\n");
@@ -502,6 +527,18 @@ unsafe fn append_leaf_certificate_section(
         out.push_str(&h);
     }
     out.push_str(&format!("  Cert Serial Number: {serial}\r\n"));
+    if let Some(line) = public_key_summary_line(leaf) {
+        out.push_str(&line);
+    }
+    if let Some(ku) = key_usage_block(leaf) {
+        out.push_str(&ku);
+    }
+    if let Some(bc) = basic_constraints_block(leaf) {
+        out.push_str(&bc);
+    }
+    if let Some(eku) = enhanced_key_usage_block(leaf) {
+        out.push_str(&eku);
+    }
     if let Some(san) = subject_alt_name_block(leaf) {
         out.push_str(&san);
     }
