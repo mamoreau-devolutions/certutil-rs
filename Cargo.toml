@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-native-tls = "0.2"
+schannel = "0.1.29"
 windows = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -18,5 +18,8 @@ windows = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Time",
 ] }
+der-parser = "9"
+sha1 = "0.10"
+sha2 = "0.10"
 
 [dev-dependencies]

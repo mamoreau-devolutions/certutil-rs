@@ -1,6 +1,6 @@
 //! TLS client handshake: fetch the server leaf certificate (DER) for export and offline `certutil -verify`.
 //!
-//! Uses the OS TLS stack via **`native-tls`** (Schannel on Windows).
+//! Uses **Schannel** via the [`schannel`] crate (same stack as Windows TLS).
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -8,7 +8,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
-use native_tls::TlsConnector;
+use schannel::schannel_cred::{Direction, SchannelCred};
+use schannel::tls_stream::{Builder as TlsBuilder, HandshakeError};
 
 /// Split `host:port` when `port` is numeric after the last colon; support `[IPv6]:port`.
 pub fn split_host_and_port(input: &str, default_port: u16) -> Result<(String, u16)> {
@@ -52,12 +53,105 @@ pub fn split_host_and_port(input: &str, default_port: u16) -> Result<(String, u1
 }
 
 /// Default name used for TLS SNI / hostname verification when `--server-name` is omitted.
-/// Strips IPv6 brackets so `[]::1` becomes `::1` (native-tls / Schannel behavior for literals).
+/// Strips IPv6 brackets so `[::1]` becomes `::1`.
 pub fn default_server_name(host_for_tcp: &str) -> &str {
     host_for_tcp
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host_for_tcp)
+}
+
+fn fetch_tls_inner(
+    host_spec: &str,
+    default_port: u16,
+    server_name: Option<&str>,
+    insecure: bool,
+    verbose: bool,
+) -> Result<(Vec<u8>, Option<String>)> {
+    let (host, port) = split_host_and_port(host_spec, default_port)?;
+    let addr = format!("{host}:{port}");
+    let tcp = TcpStream::connect(&addr).with_context(|| format!("TCP connect to {addr}"))?;
+
+    let sn = server_name.unwrap_or_else(|| default_server_name(&host));
+
+    let cred = SchannelCred::builder()
+        .acquire(Direction::Outbound)
+        .context("SchannelCred::acquire (Outbound)")?;
+
+    let mut tls_builder = TlsBuilder::new();
+    tls_builder.domain(sn);
+    if insecure {
+        tls_builder.accept_invalid_hostnames(true);
+    }
+    let insecure_cb = insecure;
+    tls_builder.verify_callback(move |v| {
+        if insecure_cb {
+            Ok(())
+        } else {
+            v.result()
+        }
+    });
+
+    if verbose {
+        tls_builder.request_application_protocols(&[b"h2", b"http/1.1"]);
+    }
+
+    let tls = tls_builder.connect(cred, tcp).map_err(|e: HandshakeError<_>| match e {
+        HandshakeError::Failure(e) => anyhow!("{e}"),
+        HandshakeError::Interrupted(_) => anyhow!(
+            "TLS handshake interrupted on a blocking socket (unexpected)"
+        ),
+    })?;
+
+    let peer = tls
+        .peer_certificate()
+        .context("peer_certificate (TLS)")?;
+    let der = peer.to_der().to_vec();
+
+    let diag = if verbose {
+        let tcp = tls.get_ref();
+        let mut lines = String::new();
+        lines.push_str("TLS diagnostics:\r\n");
+        lines.push_str(&format!(
+            "  TCP local:  {}\r\n",
+            tcp.local_addr().map(|a| a.to_string()).unwrap_or_else(|e| e.to_string())
+        ));
+        lines.push_str(&format!(
+            "  TCP peer:   {}\r\n",
+            tcp.peer_addr().map(|a| a.to_string()).unwrap_or_else(|e| e.to_string())
+        ));
+        lines.push_str(&format!("  Server name (SNI / validation): {sn}\r\n"));
+        match tls.negotiated_application_protocol() {
+            Ok(Some(alpn)) => {
+                lines.push_str(&format!(
+                    "  ALPN negotiated: {}\r\n",
+                    String::from_utf8_lossy(&alpn)
+                ));
+            }
+            Ok(None) => {
+                lines.push_str("  ALPN negotiated: (none)\r\n");
+            }
+            Err(e) => {
+                lines.push_str(&format!("  ALPN negotiated: (query failed: {e})\r\n"));
+            }
+        }
+        match tls.session_resumed() {
+            Ok(r) => lines.push_str(&format!("  Session resumed: {r}\r\n")),
+            Err(e) => lines.push_str(&format!("  Session resumed: (query failed: {e})\r\n")),
+        }
+        if let Some(store) = peer.cert_store() {
+            let n = store.certs().count();
+            lines.push_str(&format!(
+                "  Certificates in peer message store (leaf + intermediates): {n}\r\n"
+            ));
+        }
+        lines.push_str("\r\n");
+        Some(lines)
+    } else {
+        None
+    };
+
+    Ok((der, diag))
 }
 
 /// Perform a TLS handshake and return the peer **leaf** certificate in DER form.
@@ -67,28 +161,18 @@ pub fn fetch_tls_leaf_der(
     server_name: Option<&str>,
     insecure: bool,
 ) -> Result<Vec<u8>> {
-    let (host, port) = split_host_and_port(host_spec, default_port)?;
-    let addr = format!("{host}:{port}");
-    let tcp = TcpStream::connect(&addr).with_context(|| format!("TCP connect to {addr}"))?;
+    fetch_tls_inner(host_spec, default_port, server_name, insecure, false).map(|(d, _)| d)
+}
 
-    let mut builder = TlsConnector::builder();
-    if insecure {
-        builder.danger_accept_invalid_certs(true);
-        builder.danger_accept_invalid_hostnames(true);
-    }
-    let connector = builder.build().context("TlsConnector::build")?;
-
-    let sn = server_name.unwrap_or_else(|| default_server_name(&host));
-    let tls = connector
-        .connect(sn, tcp)
-        .with_context(|| format!("TLS handshake with server name {sn:?}"))?;
-
-    let cert = tls
-        .peer_certificate()
-        .context("no peer certificate returned from TLS stack")?
-        .ok_or_else(|| anyhow!("peer_certificate() was empty"))?;
-
-    cert.to_der().context("encode leaf certificate as DER")
+/// Same as [`fetch_tls_leaf_der`], plus optional diagnostic lines (TCP, ALPN, session resumption, chain count).
+pub fn fetch_tls_leaf_der_with_diagnostics(
+    host_spec: &str,
+    default_port: u16,
+    server_name: Option<&str>,
+    insecure: bool,
+    verbose: bool,
+) -> Result<(Vec<u8>, Option<String>)> {
+    fetch_tls_inner(host_spec, default_port, server_name, insecure, verbose)
 }
 
 /// PEM text (`BEGIN CERTIFICATE`) for a single DER blob.

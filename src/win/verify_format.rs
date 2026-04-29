@@ -27,7 +27,7 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
 use super::cert_urls::{decode_aia_rows, decode_cdp_urls, friendly_access_method_label};
-use super::dump::cert_sha1_thumbprint_bytes;
+use super::cert_hash::cert_sha1_thumbprint_bytes;
 use super::encoding::CERT_ENCODING;
 
 /// Comma-separated RDN string (closest match to certutil’s multi-component DN lines).

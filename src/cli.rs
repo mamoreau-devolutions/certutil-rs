@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Read-only certificate diagnostics (no store changes). Inspired by `certutil.exe` verify/dump/URL flows.
 #[derive(Debug, Parser)]
@@ -12,13 +12,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Dump certificate structure (encoded file: PEM or DER).
+    /// Dump certificate, CRL, CSR, or PKCS#7 (PEM or DER file).
     #[command(name = "-dump")]
     Dump {
         #[arg(value_name = "INFILE")]
         infile: PathBuf,
     },
-    /// Build and validate certificate chains (`CertGetCertificateChain` + `CERT_CHAIN_POLICY_BASE`).
+    /// Build and validate certificate chains (`CertGetCertificateChain` + chain policies).
     #[command(name = "-verify")]
     Verify {
         /// Retrieve and validate AIA certs and CDP CRLs during chain building (`certutil -verify -urlfetch`).
@@ -27,9 +27,18 @@ pub enum Command {
         /// URL retrieval timeout in milliseconds (`certutil -t`).
         #[arg(short = 't', long = "timeout-ms", value_name = "milliseconds")]
         timeout_ms: Option<u32>,
-        /// After BASE policy, run `CERT_CHAIN_POLICY_SSL` with this DNS name (certutil-rs extension).
+        /// After BASE policy, run `CERT_CHAIN_POLICY_SSL` with this DNS name (HTTPS server profile).
         #[arg(long = "ssl-dns-name", value_name = "DNS")]
         ssl_dns_name: Option<String>,
+        /// SSL **client** profile: `CERT_CHAIN_POLICY_SSL` with `AUTHTYPE_CLIENT` and this expected DNS name.
+        #[arg(long = "ssl-client-dns-name", value_name = "DNS")]
+        ssl_client_dns_name: Option<String>,
+        /// Run **Authenticode** chain policy pass (`CERT_CHAIN_POLICY_AUTHENTICODE`).
+        #[arg(long = "policy-authenticode")]
+        policy_authenticode: bool,
+        /// Run **Authenticode timestamping** chain policy pass (`CERT_CHAIN_POLICY_AUTHENTICODE_TS`).
+        #[arg(long = "policy-authenticode-ts")]
+        policy_authenticode_ts: bool,
         /// Probe each AIA/CDP URL with **CryptRetrieveObjectByUrl** (live network; uses `-t` / default timeout).
         #[arg(long = "probe-urls")]
         probe_urls: bool,
@@ -38,6 +47,41 @@ pub enum Command {
         probe_revocation: bool,
         #[arg(value_name = "CRTBLOB")]
         crtblob: PathBuf,
+    },
+    /// Encode a binary file as hex or PEM-style base64 (`certutil -encode` subset).
+    #[command(name = "-encode")]
+    Encode {
+        #[arg(value_name = "INFILE")]
+        infile: PathBuf,
+        #[arg(value_name = "OUTFILE")]
+        outfile: PathBuf,
+        #[arg(long, value_enum, default_value_t = EncodeCliFmt::Base64Pem)]
+        fmt: EncodeCliFmt,
+    },
+    /// Decode PEM/base64/hex text file to binary (`certutil -decode` subset).
+    #[command(name = "-decode")]
+    Decode {
+        #[arg(value_name = "INFILE")]
+        infile: PathBuf,
+        #[arg(value_name = "OUTFILE")]
+        outfile: PathBuf,
+    },
+    /// Print SHA-1 or SHA-256 hash of a file (`certutil -hashfile`).
+    #[command(name = "-hashfile")]
+    Hashfile {
+        #[arg(value_name = "INFILE")]
+        path: PathBuf,
+        #[arg(value_name = "SHA1|SHA256")]
+        alg: String,
+    },
+    /// List certificates in a system store (read-only; `certutil -store` view subset).
+    #[command(name = "-store")]
+    Store {
+        #[arg(value_name = "STORE")]
+        store: String,
+        /// Match certs whose subject or issuer contains this substring (case-insensitive).
+        #[arg(long = "filter")]
+        filter: Option<String>,
     },
     /// Verify certificate or CRL URLs (`CryptRetrieveObjectByUrl`; `certutil -URL`).
     #[command(name = "-URL")]
@@ -53,6 +97,12 @@ pub enum Command {
         #[command(subcommand)]
         action: TlsAction,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum EncodeCliFmt {
+    Hex,
+    Base64Pem,
 }
 
 #[derive(Debug, Subcommand)]
@@ -74,6 +124,9 @@ pub enum TlsAction {
         /// Disable TLS certificate (and hostname) validation (diagnostics only).
         #[arg(long)]
         insecure: bool,
+        /// Print TCP endpoints, ALPN (if probed), session resumption, and peer chain store size.
+        #[arg(long)]
+        verbose: bool,
         /// Force PEM or DER regardless of file extension.
         #[arg(long, value_name = "pem|der")]
         format: Option<String>,

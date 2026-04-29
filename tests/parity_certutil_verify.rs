@@ -125,6 +125,7 @@ fn parity_urlfetch_verify_certutil_and_certutil_rs() {
         ssl_dns_name: None,
         probe_urls: false,
         probe_revocation: false,
+        ..Default::default()
     };
     let report = verify_cert_file_with_options(&path, opts).expect("certutil-rs -verify");
     assert_certutil_rs_base_ok(&report);
@@ -151,11 +152,8 @@ fn parity_sslpolicy_verify_certutil_and_certutil_rs() {
     assert_certutil_verify_succeeded(&cu);
 
     let opts = VerifyOptions {
-        urlfetch: false,
-        timeout_ms: None,
         ssl_dns_name: Some(HOST.into()),
-        probe_urls: false,
-        probe_revocation: false,
+        ..Default::default()
     };
     let report = verify_cert_file_with_options(&path, opts).expect("certutil-rs -verify");
     assert_certutil_rs_base_ok(&report);

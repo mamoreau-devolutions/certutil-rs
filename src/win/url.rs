@@ -249,7 +249,7 @@ unsafe fn retrieve_one_url(
     url: &str,
     timeout_ms: u32,
     oid: PCSTR,
-) -> Result<(String, Option<(usize, String)>)> {
+) -> Result<(String, Option<(usize, String)>, Option<Vec<u8>>)> {
     let c_url = CString::new(url).with_context(|| format!("URL contains NUL: {url:?}"))?;
     let mut pv: *mut c_void = std::ptr::null_mut();
 
@@ -283,12 +283,17 @@ unsafe fn retrieve_one_url(
     if let Some(der) = blob_or_raw_der(pv) {
         CryptMemFree(Some(pv));
         let preview = der_byte_preview_hex(der.as_slice(), 32);
+        let der_copy = der.clone();
         match report_der_cert_or_crl(der.as_slice()) {
-            Ok(report) => Ok((report, Some(preview))),
-            Err(_) => Ok((opaque_der_retrieval_report(der.as_slice()), Some(preview))),
+            Ok(report) => Ok((report, Some(preview), Some(der_copy))),
+            Err(_) => Ok((
+                opaque_der_retrieval_report(der.as_slice()),
+                Some(preview),
+                Some(der_copy),
+            )),
         }
     } else if let Some(s) = try_report_cert_or_crl_context(pv)? {
-        Ok((s, None))
+        Ok((s, None, None))
     } else {
         CryptMemFree(Some(pv));
         Err(anyhow!(
@@ -306,7 +311,7 @@ pub fn retrieve_url_report(url: &str, timeout_ms: u32) -> Result<String> {
         // Prefer auto OID first: many HTTPS CA URLs return `CRYPT_INTEGER_BLOB` at `pv` (cbData first).
         // PKIX `szOID_PKIX_CA_ISSUERS` often yields `PCCERT_CONTEXT`, which we handle second.
         match retrieve_one_url(url, timeout_ms, PCSTR::null()) {
-            Ok((s, _)) => {
+            Ok((s, _, _)) => {
                 out.push_str(&s);
                 Ok(out)
             }
@@ -314,7 +319,7 @@ pub fn retrieve_url_report(url: &str, timeout_ms: u32) -> Result<String> {
                 out.push_str(&format!(
                     "Attempt with default object type: {e_auto}\r\n\r\n"
                 ));
-                let (s, _) = retrieve_one_url(url, timeout_ms, szOID_PKIX_CA_ISSUERS)?;
+                let (s, _, _) = retrieve_one_url(url, timeout_ms, szOID_PKIX_CA_ISSUERS)?;
                 out.push_str(&s);
                 Ok(out)
             }
@@ -383,7 +388,7 @@ fn format_retrieval_probes_for_entries(
         let mut ok = false;
         for (label, oid) in attempts {
             match unsafe { retrieve_one_url(&e.url, timeout_ms, oid) } {
-                Ok((report, der_preview)) => {
+                Ok((report, der_preview, full_der)) => {
                     let line = summary_first_line(&report);
                     out.push_str(&format!("    OK ({label}) — {line}\r\n"));
                     if matches!(e.kind, CertUrlKind::AiaOcsp) {
@@ -392,6 +397,9 @@ fn format_retrieval_probes_for_entries(
                             out.push_str(&format!(
                                 "    DER payload: {len} byte(s) total; first {n} octet(s) (hex): {hex}\r\n"
                             ));
+                        }
+                        if let Some(ref bytes) = full_der {
+                            out.push_str(&crate::win::ocsp_der::summarize_ocsp_der(bytes));
                         }
                     }
                     ok = true;

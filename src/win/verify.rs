@@ -5,16 +5,17 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use windows::core::Error as WinError;
+use windows::core::{Error as WinError, PCSTR};
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Security::Cryptography::{
     CertCreateCertificateContext, CertFreeCertificateChain, CertFreeCertificateContext,
     CertGetCertificateChain, CertVerifyCertificateChainPolicy, CertVerifyRevocation,
-    CERT_CHAIN_CONTEXT, CERT_CHAIN_ELEMENT, CERT_CHAIN_PARA, CERT_CHAIN_POLICY_BASE,
-    CERT_CHAIN_POLICY_FLAGS, CERT_CHAIN_POLICY_PARA, CERT_CHAIN_POLICY_SSL,
-    CERT_CHAIN_POLICY_STATUS, CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT,
-    CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, CERT_CONTEXT, CERT_CONTEXT_REVOCATION_TYPE,
-    CERT_REVOCATION_PARA, CERT_REVOCATION_STATUS, CERT_SIMPLE_CHAIN,
+    CERT_CHAIN_CONTEXT, CERT_CHAIN_ELEMENT, CERT_CHAIN_PARA, CERT_CHAIN_POLICY_AUTHENTICODE,
+    CERT_CHAIN_POLICY_AUTHENTICODE_TS, CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_FLAGS,
+    CERT_CHAIN_POLICY_PARA, CERT_CHAIN_POLICY_SSL, CERT_CHAIN_POLICY_STATUS,
+    CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT, CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+    CERT_CONTEXT, CERT_CONTEXT_REVOCATION_TYPE, CERT_REVOCATION_PARA, CERT_REVOCATION_STATUS,
+    CERT_SIMPLE_CHAIN,
 };
 
 use super::encoding::CERT_ENCODING;
@@ -40,6 +41,12 @@ pub struct VerifyOptions {
     pub probe_urls: bool,
     /// Call **CertVerifyRevocation** for each chain element with its parent issuer (network / cache I/O).
     pub probe_revocation: bool,
+    /// Optional DNS name for **SSL client** profile (`AUTHTYPE_CLIENT` + `CERT_CHAIN_POLICY_SSL`).
+    pub ssl_client_dns_name: Option<String>,
+    /// Extra pass: **Authenticode** chain policy.
+    pub policy_authenticode: bool,
+    /// Extra pass: **Authenticode timestamping** chain policy.
+    pub policy_authenticode_ts: bool,
 }
 
 /// [`HTTPSPolicyCallbackData`](https://learn.microsoft.com/windows/win32/api/wincrypt/ns-wincrypt-httpspolicycallbackdata) — server TLS validation (`AUTHTYPE_SERVER` = 2).
@@ -51,6 +58,7 @@ struct HttpsPolicyCallbackData {
     pwsz_server_name: windows::core::PWSTR,
 }
 
+const AUTHTYPE_CLIENT: u32 = 1;
 const AUTHTYPE_SERVER: u32 = 2;
 
 /// Build a chain against trust stores and evaluate **BASE** chain policy (closest generic check to `certutil -verify` exploration).
@@ -127,8 +135,14 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             opts.urlfetch, url_timeout, opts.ssl_dns_name
         ));
         out.push_str(&format!(
-            "  probe-urls: {}, probe-revocation: {}, probe/chain timeout uses -t or default {} ms\r\n\r\n",
+            "  probe-urls: {}, probe-revocation: {}, probe/chain timeout uses -t or default {} ms\r\n",
             opts.probe_urls, opts.probe_revocation, probe_timeout_ms
+        ));
+        out.push_str(&format!(
+            "  ssl-client-dns-name: {:?}, policy-authenticode: {}, policy-authenticode-ts: {}\r\n\r\n",
+            opts.ssl_client_dns_name,
+            opts.policy_authenticode,
+            opts.policy_authenticode_ts
         ));
 
         out.push_str("CertGetCertificateChain flags:\r\n");
@@ -282,6 +296,65 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             }
         }
 
+        if let Some(ref ssl_client) = opts.ssl_client_dns_name {
+            let mut wide: Vec<u16> = OsStr::new(ssl_client.as_str())
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut https = HttpsPolicyCallbackData {
+                cb_struct: std::mem::size_of::<HttpsPolicyCallbackData>() as u32,
+                dw_auth_type: AUTHTYPE_CLIENT,
+                fdw_checks: 0,
+                pwsz_server_name: windows::core::PWSTR(wide.as_mut_ptr()),
+            };
+            let policy_ssl_para = CERT_CHAIN_POLICY_PARA {
+                cbSize: std::mem::size_of::<CERT_CHAIN_POLICY_PARA>() as u32,
+                dwFlags: CERT_CHAIN_POLICY_FLAGS(0),
+                pvExtraPolicyPara: (&mut https as *mut HttpsPolicyCallbackData).cast(),
+            };
+
+            let mut policy_status_ssl = CERT_CHAIN_POLICY_STATUS {
+                cbSize: std::mem::size_of::<CERT_CHAIN_POLICY_STATUS>() as u32,
+                ..Default::default()
+            };
+
+            let policy_ssl_ok: BOOL = CertVerifyCertificateChainPolicy(
+                CERT_CHAIN_POLICY_SSL,
+                p_chain,
+                &policy_ssl_para,
+                &mut policy_status_ssl,
+            );
+
+            out.push_str("\r\nCERT_CHAIN_POLICY_SSL (client profile):\r\n");
+            out.push_str(&format!("  Expected DNS name: {ssl_client}\r\n"));
+            if !policy_ssl_ok.as_bool() {
+                let e = WinError::from_win32();
+                out.push_str(&format!(
+                    "  CertVerifyCertificateChainPolicy (SSL client) failed: {e}\r\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  Policy dwError: 0x{:08x} (0 = success)\r\n",
+                    policy_status_ssl.dwError
+                ));
+            }
+        }
+
+        run_optional_chain_policy(
+            &mut out,
+            opts.policy_authenticode,
+            CERT_CHAIN_POLICY_AUTHENTICODE,
+            "CERT_CHAIN_POLICY_AUTHENTICODE",
+            p_chain,
+        )?;
+        run_optional_chain_policy(
+            &mut out,
+            opts.policy_authenticode_ts,
+            CERT_CHAIN_POLICY_AUTHENTICODE_TS,
+            "CERT_CHAIN_POLICY_AUTHENTICODE_TS",
+            p_chain,
+        )?;
+
         if opts.probe_urls {
             out.push_str("\r\nRetrieval probes (CryptRetrieveObjectByUrl):\r\n");
             let probe_txt = format_retrieval_probes_for_chain(chain, probe_timeout_ms);
@@ -295,6 +368,45 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
         out.push_str("\r\ncertutil-rs: -verify command completed successfully.\r\n");
         Ok(out)
     }
+}
+
+unsafe fn run_optional_chain_policy(
+    out: &mut String,
+    enabled: bool,
+    policy_oid: PCSTR,
+    title: &str,
+    p_chain: *const CERT_CHAIN_CONTEXT,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let policy_para = CERT_CHAIN_POLICY_PARA {
+        cbSize: std::mem::size_of::<CERT_CHAIN_POLICY_PARA>() as u32,
+        ..Default::default()
+    };
+    let mut policy_status = CERT_CHAIN_POLICY_STATUS {
+        cbSize: std::mem::size_of::<CERT_CHAIN_POLICY_STATUS>() as u32,
+        ..Default::default()
+    };
+    let ok: BOOL = CertVerifyCertificateChainPolicy(
+        policy_oid,
+        p_chain,
+        &policy_para,
+        &mut policy_status,
+    );
+    out.push_str(&format!("\r\n{title}:\r\n"));
+    if !ok.as_bool() {
+        let e = WinError::from_win32();
+        out.push_str(&format!(
+            "  CertVerifyCertificateChainPolicy failed: {e}\r\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "  Policy dwError: 0x{:08x} (0 = success)\r\n",
+            policy_status.dwError
+        ));
+    }
+    Ok(())
 }
 
 fn append_cert_verify_revocation_section(
