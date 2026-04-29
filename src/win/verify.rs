@@ -1,6 +1,6 @@
 //! Chain building + policy check (`CertGetCertificateChain`, `CertVerifyCertificateChainPolicy`).
 
-use std::ffi::OsStr;
+use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
@@ -9,15 +9,17 @@ use windows::core::Error as WinError;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Security::Cryptography::{
     CertCreateCertificateContext, CertFreeCertificateChain, CertFreeCertificateContext,
-    CertGetCertificateChain, CertVerifyCertificateChainPolicy, CERT_CHAIN_CONTEXT, CERT_CHAIN_ELEMENT,
-    CERT_CHAIN_PARA, CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_FLAGS, CERT_CHAIN_POLICY_PARA,
-    CERT_CHAIN_POLICY_SSL, CERT_CHAIN_POLICY_STATUS, CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT,
-    CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, CERT_CONTEXT, CERT_SIMPLE_CHAIN,
+    CertGetCertificateChain, CertVerifyCertificateChainPolicy, CertVerifyRevocation,
+    CERT_CHAIN_CONTEXT, CERT_CHAIN_ELEMENT, CERT_CHAIN_PARA, CERT_CHAIN_POLICY_BASE,
+    CERT_CHAIN_POLICY_FLAGS, CERT_CHAIN_POLICY_PARA, CERT_CHAIN_POLICY_SSL,
+    CERT_CHAIN_POLICY_STATUS, CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT,
+    CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, CERT_CONTEXT, CERT_CONTEXT_REVOCATION_TYPE,
+    CERT_REVOCATION_PARA, CERT_REVOCATION_STATUS, CERT_SIMPLE_CHAIN,
 };
 
 use super::encoding::CERT_ENCODING;
 use super::names::cert_simple_display_name;
-use super::url::DEFAULT_URL_TIMEOUT_MS;
+use super::url::{format_retrieval_probes_for_chain, DEFAULT_URL_TIMEOUT_MS};
 use super::verify_format::{
     authority_info_access_block, cdp_distribution_points_block, cert_rdn_comma,
     describe_chain_build_flags, explain_cert_trust_error_status, explain_cert_trust_info_status,
@@ -34,6 +36,10 @@ pub struct VerifyOptions {
     pub timeout_ms: Option<u32>,
     /// Optional DNS name for **`CERT_CHAIN_POLICY_SSL`** (HTTPS-style hostname policy; certutil-rs extension).
     pub ssl_dns_name: Option<String>,
+    /// Live **CryptRetrieveObjectByUrl** probes for each AIA/CDP URL in the built chain (network I/O).
+    pub probe_urls: bool,
+    /// Call **CertVerifyRevocation** for each chain element with its parent issuer (network / cache I/O).
+    pub probe_revocation: bool,
 }
 
 /// [`HTTPSPolicyCallbackData`](https://learn.microsoft.com/windows/win32/api/wincrypt/ns-wincrypt-httpspolicycallbackdata) — server TLS validation (`AUTHTYPE_SERVER` = 2).
@@ -74,9 +80,13 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
 
         let url_timeout = match opts.timeout_ms {
             Some(t) => t,
-            None if opts.urlfetch => DEFAULT_URL_TIMEOUT_MS,
+            None if opts.urlfetch || opts.probe_urls || opts.probe_revocation => {
+                DEFAULT_URL_TIMEOUT_MS
+            }
             None => 0,
         };
+
+        let probe_timeout_ms = opts.timeout_ms.unwrap_or(DEFAULT_URL_TIMEOUT_MS);
 
         let chain_para = CERT_CHAIN_PARA {
             cbSize: std::mem::size_of::<CERT_CHAIN_PARA>() as u32,
@@ -113,8 +123,12 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
 
         out.push_str("Verify options:\r\n");
         out.push_str(&format!(
-            "  urlfetch: {}, URL retrieval timeout (ms): {}, ssl-dns-name: {:?}\r\n\r\n",
+            "  urlfetch: {}, URL retrieval timeout (ms): {}, ssl-dns-name: {:?}\r\n",
             opts.urlfetch, url_timeout, opts.ssl_dns_name
+        ));
+        out.push_str(&format!(
+            "  probe-urls: {}, probe-revocation: {}, probe/chain timeout uses -t or default {} ms\r\n\r\n",
+            opts.probe_urls, opts.probe_revocation, probe_timeout_ms
         ));
 
         out.push_str("CertGetCertificateChain flags:\r\n");
@@ -167,8 +181,12 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             chain.TrustStatus.dwErrorStatus,
             chain.TrustStatus.dwInfoStatus,
         ));
-        out.push_str(&explain_cert_trust_error_status(chain.TrustStatus.dwErrorStatus));
-        out.push_str(&explain_cert_trust_info_status(chain.TrustStatus.dwInfoStatus));
+        out.push_str(&explain_cert_trust_error_status(
+            chain.TrustStatus.dwErrorStatus,
+        ));
+        out.push_str(&explain_cert_trust_info_status(
+            chain.TrustStatus.dwInfoStatus,
+        ));
 
         if chain.fHasRevocationFreshnessTime.as_bool() {
             out.push_str(&format!(
@@ -187,8 +205,12 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
                 simple.TrustStatus.dwErrorStatus,
                 simple.TrustStatus.dwInfoStatus,
             ));
-            out.push_str(&explain_cert_trust_error_status(simple.TrustStatus.dwErrorStatus));
-            out.push_str(&explain_cert_trust_info_status(simple.TrustStatus.dwInfoStatus));
+            out.push_str(&explain_cert_trust_error_status(
+                simple.TrustStatus.dwErrorStatus,
+            ));
+            out.push_str(&explain_cert_trust_info_status(
+                simple.TrustStatus.dwInfoStatus,
+            ));
 
             if simple.fHasRevocationFreshnessTime.as_bool() {
                 out.push_str(&format!(
@@ -260,9 +282,85 @@ pub fn verify_der_with_options(der: &[u8], opts: VerifyOptions) -> Result<String
             }
         }
 
+        if opts.probe_urls {
+            out.push_str("\r\nRetrieval probes (CryptRetrieveObjectByUrl):\r\n");
+            let probe_txt = format_retrieval_probes_for_chain(chain, probe_timeout_ms);
+            out.push_str(&probe_txt);
+        }
+
+        if opts.probe_revocation {
+            append_cert_verify_revocation_section(&mut out, chain)?;
+        }
+
         out.push_str("\r\ncertutil-rs: -verify command completed successfully.\r\n");
         Ok(out)
     }
+}
+
+fn append_cert_verify_revocation_section(
+    out: &mut String,
+    chain: &CERT_CHAIN_CONTEXT,
+) -> Result<()> {
+    out.push_str("\r\nRevocation probe (CertVerifyRevocation):\r\n");
+    unsafe {
+        if chain.cChain == 0 || chain.rgpChain.is_null() {
+            out.push_str("  (no simple chain)\r\n");
+            return Ok(());
+        }
+        let simple: &CERT_SIMPLE_CHAIN = &**chain.rgpChain;
+        if simple.cElement < 2 {
+            out.push_str("  (skipped — need at least two elements: leaf + issuer)\r\n");
+            return Ok(());
+        }
+        for i in 0..simple.cElement.saturating_sub(1) {
+            let el = *simple.rgpElement.add(i as usize);
+            if el.is_null() {
+                continue;
+            }
+            let iss_el = *simple.rgpElement.add((i + 1) as usize);
+            if iss_el.is_null() {
+                continue;
+            }
+            let cert = (*el).pCertContext;
+            let issuer = (*iss_el).pCertContext;
+            if cert.is_null() || issuer.is_null() {
+                continue;
+            }
+
+            let mut para = CERT_REVOCATION_PARA::default();
+            para.cbSize = std::mem::size_of::<CERT_REVOCATION_PARA>() as u32;
+            para.pIssuerCert = issuer;
+
+            let mut status = CERT_REVOCATION_STATUS::default();
+            status.cbSize = std::mem::size_of::<CERT_REVOCATION_STATUS>() as u32;
+
+            let ctx_slice = [cert.cast::<c_void>()];
+            out.push_str(&format!("  Chain element [{i}] with issuer [{i}+1]:\r\n"));
+            let rev_ok = CertVerifyRevocation(
+                CERT_ENCODING.0,
+                CERT_CONTEXT_REVOCATION_TYPE,
+                &ctx_slice,
+                0,
+                Some(std::ptr::from_ref(&para)),
+                &mut status,
+            );
+            if let Err(e) = rev_ok {
+                out.push_str(&format!("    CertVerifyRevocation failed: {e}\r\n"));
+                continue;
+            }
+            out.push_str(&format!(
+                "    dwError={} (0x{:08x}), dwReason={:?}\r\n",
+                status.dwError, status.dwError, status.dwReason
+            ));
+            if status.fHasFreshnessTime.as_bool() {
+                out.push_str(&format!(
+                    "    dwFreshnessTime: {} seconds\r\n",
+                    status.dwFreshnessTime
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn format_status_lines(dw_err: u32, dw_info: u32) -> String {
@@ -272,7 +370,10 @@ fn format_status_lines(dw_err: u32, dw_info: u32) -> String {
     )
 }
 
-unsafe fn append_leaf_certificate_section(out: &mut String, leaf: *const CERT_CONTEXT) -> Result<()> {
+unsafe fn append_leaf_certificate_section(
+    out: &mut String,
+    leaf: *const CERT_CONTEXT,
+) -> Result<()> {
     let issuer = cert_rdn_comma(leaf, true)
         .unwrap_or_else(|_| cert_simple_display_name(leaf, true).unwrap_or_else(|_| "?".into()));
     let subject = cert_rdn_comma(leaf, false)
@@ -321,7 +422,9 @@ unsafe fn append_chain_element_section(
         el.TrustStatus.dwErrorStatus,
         el.TrustStatus.dwInfoStatus,
     ));
-    out.push_str(&explain_cert_trust_error_status(el.TrustStatus.dwErrorStatus));
+    out.push_str(&explain_cert_trust_error_status(
+        el.TrustStatus.dwErrorStatus,
+    ));
     out.push_str(&explain_cert_trust_info_status(el.TrustStatus.dwInfoStatus));
     if let Some(note) = ocsp_ssl_trust_notes(el.TrustStatus.dwInfoStatus) {
         out.push_str(&note);

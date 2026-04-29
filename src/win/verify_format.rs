@@ -5,27 +5,28 @@ use std::ffi::c_void;
 use anyhow::{anyhow, Result};
 use windows::core::{PCSTR, PCWSTR, PSTR, PWSTR};
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-use windows::Win32::Globalization::{GetDateFormatEx, GetTimeFormatEx, DATE_SHORTDATE, TIME_FORMAT_FLAGS};
+use windows::Win32::Globalization::{
+    GetDateFormatEx, GetTimeFormatEx, DATE_SHORTDATE, TIME_FORMAT_FLAGS,
+};
 use windows::Win32::Security::Cryptography::{
-    CertFindExtension, CertGetNameStringW, CryptDecodeObject, CryptHashCertificate, CRYPT_INTEGER_BLOB,
-    CALG_SHA1, CERT_ALT_NAME_ENTRY, CERT_ALT_NAME_INFO, CERT_AUTHORITY_INFO_ACCESS, CERT_CHAIN_ELEMENT,
-    CERT_CONTEXT, CERT_EXTENSION, CERT_INFO, CERT_OTHER_NAME, CERT_REVOCATION_CRL_INFO, CRL_DIST_POINTS_INFO,
-    CERT_NAME_ISSUER_FLAG, CERT_NAME_RDN_TYPE,
-    CERT_NAME_STR_COMMA_FLAG, CRL_DIST_POINT_FULL_NAME, szOID_AUTHORITY_INFO_ACCESS, szOID_CRL_DIST_POINTS,
-    szOID_SUBJECT_ALT_NAME2, X509_ALTERNATE_NAME,
-    X509_AUTHORITY_INFO_ACCESS, X509_CRL_DIST_POINTS,
+    szOID_SUBJECT_ALT_NAME2, CertFindExtension, CertGetNameStringW, CryptDecodeObject,
+    CryptHashCertificate, CALG_SHA1, CERT_ALT_NAME_ENTRY, CERT_ALT_NAME_INFO, CERT_CHAIN_ELEMENT,
+    CERT_CONTEXT, CERT_EXTENSION, CERT_INFO, CERT_NAME_ISSUER_FLAG, CERT_NAME_RDN_TYPE,
+    CERT_NAME_STR_COMMA_FLAG, CERT_OTHER_NAME, CERT_REVOCATION_CRL_INFO,
     CERT_TRUST_HAS_EXACT_MATCH_ISSUER, CERT_TRUST_HAS_ISSUANCE_CHAIN_POLICY,
-    CERT_TRUST_HAS_KEY_MATCH_ISSUER, CERT_TRUST_HAS_NAME_MATCH_ISSUER, CERT_TRUST_HAS_PREFERRED_ISSUER,
-    CERT_TRUST_HAS_VALID_NAME_CONSTRAINTS, CERT_TRUST_IS_CA_TRUSTED, CERT_TRUST_IS_COMPLEX_CHAIN,
-    CERT_TRUST_IS_EXPLICIT_DISTRUST, CERT_TRUST_IS_FROM_EXCLUSIVE_TRUST_STORE,
-    CERT_TRUST_IS_NOT_SIGNATURE_VALID, CERT_TRUST_IS_NOT_TIME_NESTED, CERT_TRUST_IS_NOT_TIME_VALID,
-    CERT_TRUST_IS_NOT_VALID_FOR_USAGE, CERT_TRUST_IS_PARTIAL_CHAIN, CERT_TRUST_IS_PEER_TRUSTED,
-    CERT_TRUST_IS_REVOKED, CERT_TRUST_IS_SELF_SIGNED, CERT_TRUST_IS_UNTRUSTED_ROOT,
-    CERT_TRUST_REVOCATION_STATUS_UNKNOWN, CERT_TRUST_SSL_HANDSHAKE_OCSP, CERT_TRUST_SSL_RECONNECT_OCSP,
-    CERT_TRUST_SSL_TIME_VALID, CERT_TRUST_SSL_TIME_VALID_OCSP,
+    CERT_TRUST_HAS_KEY_MATCH_ISSUER, CERT_TRUST_HAS_NAME_MATCH_ISSUER,
+    CERT_TRUST_HAS_PREFERRED_ISSUER, CERT_TRUST_HAS_VALID_NAME_CONSTRAINTS,
+    CERT_TRUST_IS_CA_TRUSTED, CERT_TRUST_IS_COMPLEX_CHAIN, CERT_TRUST_IS_EXPLICIT_DISTRUST,
+    CERT_TRUST_IS_FROM_EXCLUSIVE_TRUST_STORE, CERT_TRUST_IS_NOT_SIGNATURE_VALID,
+    CERT_TRUST_IS_NOT_TIME_NESTED, CERT_TRUST_IS_NOT_TIME_VALID, CERT_TRUST_IS_NOT_VALID_FOR_USAGE,
+    CERT_TRUST_IS_PARTIAL_CHAIN, CERT_TRUST_IS_PEER_TRUSTED, CERT_TRUST_IS_REVOKED,
+    CERT_TRUST_IS_SELF_SIGNED, CERT_TRUST_IS_UNTRUSTED_ROOT, CERT_TRUST_REVOCATION_STATUS_UNKNOWN,
+    CERT_TRUST_SSL_HANDSHAKE_OCSP, CERT_TRUST_SSL_RECONNECT_OCSP, CERT_TRUST_SSL_TIME_VALID,
+    CERT_TRUST_SSL_TIME_VALID_OCSP, CRYPT_INTEGER_BLOB, X509_ALTERNATE_NAME,
 };
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
+use super::cert_urls::{decode_aia_rows, decode_cdp_urls, friendly_access_method_label};
 use super::dump::cert_sha1_thumbprint_bytes;
 use super::encoding::CERT_ENCODING;
 
@@ -67,7 +68,8 @@ pub(crate) fn filetime_local_string(ft: &FILETIME) -> Result<String> {
         FileTimeToSystemTime(ft, &mut utc)?;
         let mut local = SYSTEMTIME::default();
         SystemTimeToTzSpecificLocalTime(None, &utc, &mut local)?;
-        Ok(format_local_wall_clock(&local).unwrap_or_else(|| format_systemtime_local_fallback(&local)))
+        Ok(format_local_wall_clock(&local)
+            .unwrap_or_else(|| format_systemtime_local_fallback(&local)))
     }
 }
 
@@ -255,91 +257,20 @@ pub(crate) unsafe fn subject_alt_name_block(ctx: *const CERT_CONTEXT) -> Option<
     Some(out)
 }
 
-unsafe fn collect_urls_from_alt_name_info(alt: &CERT_ALT_NAME_INFO) -> Vec<String> {
-    let mut out = Vec::new();
-    if alt.cAltEntry == 0 || alt.rgAltEntry.is_null() {
-        return out;
-    }
-    for i in 0..alt.cAltEntry {
-        let entry = &*alt.rgAltEntry.add(i as usize);
-        if entry.dwAltNameChoice == ALT_URL {
-            if let Some(u) = pwstr_to_string(entry.Anonymous.pwszURL) {
-                out.push(u);
-            }
-        }
-    }
-    out
-}
-
 /// CRL Distribution Point HTTP/LDAP URLs from extension **2.5.29.31** (certutil-style `URL=` lines).
 ///
 /// # Safety
 /// `ctx` must be a valid `PCCERT_CONTEXT`.
 pub(crate) unsafe fn cdp_distribution_points_block(ctx: *const CERT_CONTEXT) -> Option<String> {
-    let info = &*(*ctx).pCertInfo;
-    if info.cExtension == 0 || info.rgExtension.is_null() {
-        return None;
-    }
-    let exts: &[CERT_EXTENSION] =
-        std::slice::from_raw_parts(info.rgExtension, info.cExtension as usize);
-    let ext_ptr = CertFindExtension(szOID_CRL_DIST_POINTS, exts);
-    if ext_ptr.is_null() {
-        return None;
-    }
-    let ext = &*ext_ptr;
-    if ext.Value.cbData == 0 || ext.Value.pbData.is_null() {
-        return None;
-    }
-    let enc = std::slice::from_raw_parts(ext.Value.pbData, ext.Value.cbData as usize);
-
-    let mut cb = 0u32;
-    CryptDecodeObject(CERT_ENCODING, X509_CRL_DIST_POINTS, enc, 0, None, &mut cb).ok()?;
-    if cb == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; cb as usize];
-    CryptDecodeObject(
-        CERT_ENCODING,
-        X509_CRL_DIST_POINTS,
-        enc,
-        0,
-        Some(buf.as_mut_ptr().cast()),
-        &mut cb,
-    )
-    .ok()?;
-
-    let cdp = &*(buf.as_ptr() as *const CRL_DIST_POINTS_INFO);
-    if cdp.cDistPoint == 0 || cdp.rgDistPoint.is_null() {
-        return None;
-    }
-
-    let mut urls = Vec::new();
-    for i in 0..cdp.cDistPoint {
-        let dp = &*cdp.rgDistPoint.add(i as usize);
-        if dp.DistPointName.dwDistPointNameChoice != CRL_DIST_POINT_FULL_NAME {
-            continue;
-        }
-        let alt = &dp.DistPointName.Anonymous.FullName;
-        urls.extend(collect_urls_from_alt_name_info(alt));
-    }
+    let urls = decode_cdp_urls(ctx);
     if urls.is_empty() {
         return None;
     }
-
     let mut out = String::from("  CRL Distribution Points:\r\n");
     for u in urls {
         out.push_str(&format!("    URL={u}\r\n"));
     }
     Some(out)
-}
-
-fn friendly_access_method_label(oid: &str) -> &'static str {
-    // PKIX access descriptors (RFC 5280 / wincrypt szOID_PKIX_*).
-    match oid {
-        "1.3.6.1.5.5.7.48.1" => "OCSP",
-        "1.3.6.1.5.5.7.48.2" => "CA Issuers",
-        _ => "Other",
-    }
 }
 
 unsafe fn format_access_location_entry(entry: &CERT_ALT_NAME_ENTRY) -> Option<String> {
@@ -361,51 +292,12 @@ unsafe fn format_access_location_entry(entry: &CERT_ALT_NAME_ENTRY) -> Option<St
 /// # Safety
 /// `ctx` must be a valid `PCCERT_CONTEXT`.
 pub(crate) unsafe fn authority_info_access_block(ctx: *const CERT_CONTEXT) -> Option<String> {
-    let info = &*(*ctx).pCertInfo;
-    if info.cExtension == 0 || info.rgExtension.is_null() {
-        return None;
-    }
-    let exts: &[CERT_EXTENSION] =
-        std::slice::from_raw_parts(info.rgExtension, info.cExtension as usize);
-    let ext_ptr = CertFindExtension(szOID_AUTHORITY_INFO_ACCESS, exts);
-    if ext_ptr.is_null() {
-        return None;
-    }
-    let ext = &*ext_ptr;
-    if ext.Value.cbData == 0 || ext.Value.pbData.is_null() {
-        return None;
-    }
-    let enc = std::slice::from_raw_parts(ext.Value.pbData, ext.Value.cbData as usize);
-
-    let mut cb = 0u32;
-    CryptDecodeObject(CERT_ENCODING, X509_AUTHORITY_INFO_ACCESS, enc, 0, None, &mut cb).ok()?;
-    if cb == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; cb as usize];
-    CryptDecodeObject(
-        CERT_ENCODING,
-        X509_AUTHORITY_INFO_ACCESS,
-        enc,
-        0,
-        Some(buf.as_mut_ptr().cast()),
-        &mut cb,
-    )
-    .ok()?;
-
-    let aia = &*(buf.as_ptr() as *const CERT_AUTHORITY_INFO_ACCESS);
-    if aia.cAccDescr == 0 || aia.rgAccDescr.is_null() {
-        return None;
-    }
-
+    let rows = decode_aia_rows(ctx)?;
     let mut sections = Vec::new();
-    for i in 0..aia.cAccDescr {
-        let d = &*aia.rgAccDescr.add(i as usize);
-        let Some(oid) = pstr_to_string_lossy(d.pszAccessMethod) else {
-            continue;
-        };
+    for row in rows {
+        let oid = row.method_oid;
         let label = friendly_access_method_label(oid.as_str());
-        let Some(loc) = format_access_location_entry(&d.AccessLocation) else {
+        let Some(loc) = format_access_location_entry(&row.location) else {
             continue;
         };
         sections.push(format!(
@@ -468,11 +360,11 @@ pub(crate) unsafe fn revocation_info_lines(el: &CERT_CHAIN_ELEMENT) -> Option<St
 }
 
 unsafe fn append_revocation_crl_engine_details(out: &mut String, ci: &CERT_REVOCATION_CRL_INFO) {
-    if ci.pBaseCrlContext.is_null()
-        && ci.pDeltaCrlContext.is_null()
-        && !ci.fDeltaCrlEntry.as_bool()
+    if ci.pBaseCrlContext.is_null() && ci.pDeltaCrlContext.is_null() && !ci.fDeltaCrlEntry.as_bool()
     {
-        out.push_str("    CRL info: chain engine pointer present (no CRL contexts on element).\r\n");
+        out.push_str(
+            "    CRL info: chain engine pointer present (no CRL contexts on element).\r\n",
+        );
         return;
     }
     out.push_str("    CRL engine:\r\n");
@@ -538,10 +430,7 @@ fn alt_entry_line(entry: &CERT_ALT_NAME_ENTRY) -> Option<String> {
             )),
             ALT_EDI => Some("EDI Party Name=(present)".to_string()),
             ALT_OTHER => other_alt_line(entry.Anonymous.pOtherName),
-            _ => Some(format!(
-                "Unknown AltName choice={}",
-                entry.dwAltNameChoice
-            )),
+            _ => Some(format!("Unknown AltName choice={}", entry.dwAltNameChoice)),
         }
     }
 }
@@ -579,7 +468,9 @@ unsafe fn pwstr_to_string(p: PWSTR) -> Option<String> {
     while *p.0.add(len) != 0 && len < 4096 {
         len += 1;
     }
-    Some(String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len)))
+    Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+        p.0, len,
+    )))
 }
 
 unsafe fn pstr_to_string_lossy(p: PSTR) -> Option<String> {
@@ -598,10 +489,7 @@ fn directory_alt_line(blob: &CRYPT_INTEGER_BLOB) -> Option<String> {
     if blob.cbData == 0 || blob.pbData.is_null() {
         return None;
     }
-    Some(format!(
-        "Directory Address=(DER {} bytes)",
-        blob.cbData
-    ))
+    Some(format!("Directory Address=(DER {} bytes)", blob.cbData))
 }
 
 fn ip_alt_line(blob: &CRYPT_INTEGER_BLOB) -> Option<String> {
@@ -623,7 +511,11 @@ fn ip_alt_line(blob: &CRYPT_INTEGER_BLOB) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join(":"),
-            _ => s.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":"),
+            _ => s
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(":"),
         };
         Some(format!("IP Address={formatted}"))
     }
@@ -649,11 +541,7 @@ pub(crate) fn format_revocation_freshness(seconds: u32) -> String {
         ));
     }
     if days > 0 {
-        parts.push(format!(
-            "{} Day{}",
-            days,
-            if days == 1 { "" } else { "s" }
-        ));
+        parts.push(format!("{} Day{}", days, if days == 1 { "" } else { "s" }));
     }
     if hours > 0 {
         parts.push(format!(
@@ -738,13 +626,19 @@ fn push_matching_bits(dw: u32, pairs: &[(u32, &'static str)], out: &mut Vec<&'st
 pub(crate) fn explain_cert_trust_error_status(dw: u32) -> String {
     const PAIRS: &[(u32, &str)] = &[
         (CERT_TRUST_IS_NOT_TIME_VALID, "CERT_TRUST_IS_NOT_TIME_VALID"),
-        (CERT_TRUST_IS_NOT_TIME_NESTED, "CERT_TRUST_IS_NOT_TIME_NESTED"),
+        (
+            CERT_TRUST_IS_NOT_TIME_NESTED,
+            "CERT_TRUST_IS_NOT_TIME_NESTED",
+        ),
         (CERT_TRUST_IS_REVOKED, "CERT_TRUST_IS_REVOKED"),
         (
             CERT_TRUST_IS_NOT_SIGNATURE_VALID,
             "CERT_TRUST_IS_NOT_SIGNATURE_VALID",
         ),
-        (CERT_TRUST_IS_NOT_VALID_FOR_USAGE, "CERT_TRUST_IS_NOT_VALID_FOR_USAGE"),
+        (
+            CERT_TRUST_IS_NOT_VALID_FOR_USAGE,
+            "CERT_TRUST_IS_NOT_VALID_FOR_USAGE",
+        ),
         (CERT_TRUST_IS_UNTRUSTED_ROOT, "CERT_TRUST_IS_UNTRUSTED_ROOT"),
         (CERT_TRUST_IS_PARTIAL_CHAIN, "CERT_TRUST_IS_PARTIAL_CHAIN"),
         (
@@ -755,7 +649,10 @@ pub(crate) fn explain_cert_trust_error_status(dw: u32) -> String {
             CERT_TRUST_IS_FROM_EXCLUSIVE_TRUST_STORE,
             "CERT_TRUST_IS_FROM_EXCLUSIVE_TRUST_STORE",
         ),
-        (CERT_TRUST_IS_EXPLICIT_DISTRUST, "CERT_TRUST_IS_EXPLICIT_DISTRUST"),
+        (
+            CERT_TRUST_IS_EXPLICIT_DISTRUST,
+            "CERT_TRUST_IS_EXPLICIT_DISTRUST",
+        ),
         (CERT_TRUST_IS_COMPLEX_CHAIN, "CERT_TRUST_IS_COMPLEX_CHAIN"),
     ];
     let mut parts = Vec::new();

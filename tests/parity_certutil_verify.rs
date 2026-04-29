@@ -102,8 +102,8 @@ fn parity_default_verify_certutil_and_certutil_rs() {
     let cu = run_certutil_verify(&["-verify"], &path);
     assert_certutil_verify_succeeded(&cu);
 
-    let report =
-        verify_cert_file_with_options(&path, VerifyOptions::default()).expect("certutil-rs -verify");
+    let report = verify_cert_file_with_options(&path, VerifyOptions::default())
+        .expect("certutil-rs -verify");
     assert_certutil_rs_base_ok(&report);
     assert_certutil_rs_extension_dump(&report);
 
@@ -123,6 +123,8 @@ fn parity_urlfetch_verify_certutil_and_certutil_rs() {
         urlfetch: true,
         timeout_ms: Some(30_000),
         ssl_dns_name: None,
+        probe_urls: false,
+        probe_revocation: false,
     };
     let report = verify_cert_file_with_options(&path, opts).expect("certutil-rs -verify");
     assert_certutil_rs_base_ok(&report);
@@ -152,6 +154,8 @@ fn parity_sslpolicy_verify_certutil_and_certutil_rs() {
         urlfetch: false,
         timeout_ms: None,
         ssl_dns_name: Some(HOST.into()),
+        probe_urls: false,
+        probe_revocation: false,
     };
     let report = verify_cert_file_with_options(&path, opts).expect("certutil-rs -verify");
     assert_certutil_rs_base_ok(&report);

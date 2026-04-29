@@ -27,16 +27,23 @@ pub fn split_host_and_port(input: &str, default_port: u16) -> Result<(String, u1
             return Ok((format!("[{inner}]"), default_port));
         }
         if let Some(p) = rest.strip_prefix(':') {
-            let port: u16 = p.parse().with_context(|| format!("invalid port in {:?}", input))?;
+            let port: u16 = p
+                .parse()
+                .with_context(|| format!("invalid port in {:?}", input))?;
             return Ok((format!("[{inner}]"), port));
         }
         return Err(anyhow!("unexpected characters after ] in {:?}", input));
     }
 
     if let Some((h, p)) = input.rsplit_once(':') {
-        if !h.is_empty() && !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty()
+        if !h.is_empty()
+            && !h.contains(':')
+            && p.chars().all(|c| c.is_ascii_digit())
+            && !p.is_empty()
         {
-            let port: u16 = p.parse().with_context(|| format!("invalid port in {:?}", input))?;
+            let port: u16 = p
+                .parse()
+                .with_context(|| format!("invalid port in {:?}", input))?;
             return Ok((h.to_string(), port));
         }
     }
@@ -62,17 +69,14 @@ pub fn fetch_tls_leaf_der(
 ) -> Result<Vec<u8>> {
     let (host, port) = split_host_and_port(host_spec, default_port)?;
     let addr = format!("{host}:{port}");
-    let tcp =
-        TcpStream::connect(&addr).with_context(|| format!("TCP connect to {addr}"))?;
+    let tcp = TcpStream::connect(&addr).with_context(|| format!("TCP connect to {addr}"))?;
 
     let mut builder = TlsConnector::builder();
     if insecure {
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
     }
-    let connector = builder
-        .build()
-        .context("TlsConnector::build")?;
+    let connector = builder.build().context("TlsConnector::build")?;
 
     let sn = server_name.unwrap_or_else(|| default_server_name(&host));
     let tls = connector
@@ -105,14 +109,15 @@ pub enum LeafOutputFormat {
     Der,
 }
 
-pub fn leaf_format_from_path_and_flag(path: &Path, format_override: Option<&str>) -> Result<LeafOutputFormat> {
+pub fn leaf_format_from_path_and_flag(
+    path: &Path,
+    format_override: Option<&str>,
+) -> Result<LeafOutputFormat> {
     if let Some(f) = format_override {
         return match f.to_ascii_lowercase().as_str() {
             "pem" => Ok(LeafOutputFormat::Pem),
             "der" => Ok(LeafOutputFormat::Der),
-            other => Err(anyhow!(
-                "unknown --format {other:?} (expected pem or der)"
-            )),
+            other => Err(anyhow!("unknown --format {other:?} (expected pem or der)")),
         };
     }
     let ext = path
@@ -146,7 +151,8 @@ pub fn write_leaf_certificate(
     };
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
         }
     }
     std::fs::File::create(path)

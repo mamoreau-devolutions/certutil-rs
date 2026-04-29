@@ -33,7 +33,7 @@ Requires **`certutil.exe`** on `PATH` (typically `%SystemRoot%\System32`).
 
 ```text
 certutil-rs -dump <INFILE>
-certutil-rs -verify [--urlfetch] [-t MS] [--ssl-dns-name DNS] <CRTBLOB>
+certutil-rs -verify [--urlfetch] [-t MS] [--ssl-dns-name DNS] [--probe-urls] [--probe-revocation] <CRTBLOB>
 certutil-rs -URL <InFile | URL> [-t MS]
 certutil-rs tls fetch <HOST> -o <PATH> [--port PORT] [--server-name NAME] [--insecure] [--format pem|der]
 ```
@@ -42,7 +42,11 @@ certutil-rs tls fetch <HOST> -o <PATH> [--port PORT] [--server-name NAME] [--ins
 
 `-verify` loads the encoded cert, calls **`CertGetCertificateChain`** (with revocation checking on the chain, excluding the root) and **`CertVerifyCertificateChainPolicy`** with **`CERT_CHAIN_POLICY_BASE`**, then prints trust status and chain elements. Options **`--urlfetch`** and **`-t`** mirror `certutil` URL retrieval behavior for chain building. **`--ssl-dns-name`** runs an additional **`CERT_CHAIN_POLICY_SSL`** check with that DNS name (certutil-rs extension).
 
-`-URL` uses **`CryptRetrieveObjectByUrl`** for HTTP(S) certificate/CRL retrieval diagnostics.
+**`--probe-urls`** (optional) performs live **`CryptRetrieveObjectByUrl`** attempts for every AIA and CDP URL gathered from the built chain (HTTP(S), LDAP(S), FTP), with PKIX OCSP vs CA Issuers OID hints where appropriate, and prints Win32/CryptNet-style outcomes. **`--probe-revocation`** (optional) calls **`CertVerifyRevocation`** for each chain certificate paired with its parent issuer and prints **`CERT_REVOCATION_STATUS`**. Both flags use **`-t`** milliseconds when set; otherwise a default timeout applies (see the printed “Verify options” section). These probes issue **real outbound network traffic** (and may hit caches); use only in environments where that is acceptable.
+
+`-URL` uses **`CryptRetrieveObjectByUrl`** for certificate/CRL retrieval diagnostics. When the target is a certificate file, URLs are taken from **AIA** (OCSP, CA issuers) and **CDP** extensions (not only AIA HTTP URLs).
+
+**OCSP status decoding** (good/revoked/unknown inside an OCSP response) is **not** implemented here; proving reachability and non-HTML payloads uses **`CryptRetrieveObjectByUrl`** only. Adding ASN.1 parsing (for example via an external crate) is an optional follow-up.
 
 ### TLS fetch (certutil-rs extension)
 

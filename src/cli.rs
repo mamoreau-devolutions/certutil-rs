@@ -30,6 +30,12 @@ pub enum Command {
         /// After BASE policy, run `CERT_CHAIN_POLICY_SSL` with this DNS name (certutil-rs extension).
         #[arg(long = "ssl-dns-name", value_name = "DNS")]
         ssl_dns_name: Option<String>,
+        /// Probe each AIA/CDP URL with **CryptRetrieveObjectByUrl** (live network; uses `-t` / default timeout).
+        #[arg(long = "probe-urls")]
+        probe_urls: bool,
+        /// Call **CertVerifyRevocation** for each chain cert with its parent issuer (live network or cache).
+        #[arg(long = "probe-revocation")]
+        probe_revocation: bool,
         #[arg(value_name = "CRTBLOB")]
         crtblob: PathBuf,
     },

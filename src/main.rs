@@ -16,12 +16,16 @@ fn main() -> Result<()> {
             urlfetch,
             timeout_ms,
             ssl_dns_name,
+            probe_urls,
+            probe_revocation,
             crtblob,
         } => {
             let opts = VerifyOptions {
                 urlfetch,
                 timeout_ms,
                 ssl_dns_name,
+                probe_urls,
+                probe_revocation,
             };
             let report = win::verify::verify_cert_file_with_options(&crtblob, opts)?;
             print!("{report}");

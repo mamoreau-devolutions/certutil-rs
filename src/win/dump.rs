@@ -92,7 +92,9 @@ impl Drop for FreeCertContext {
 ///
 /// # Safety
 /// `ctx` must be a valid `PCCERT_CONTEXT` for the duration of the call.
-pub(super) unsafe fn cert_sha1_thumbprint_bytes(ctx: *const windows::Win32::Security::Cryptography::CERT_CONTEXT) -> Result<[u8; 20]> {
+pub(super) unsafe fn cert_sha1_thumbprint_bytes(
+    ctx: *const windows::Win32::Security::Cryptography::CERT_CONTEXT,
+) -> Result<[u8; 20]> {
     let mut cb_hash: u32 = 0;
     CertGetCertificateContextProperty(ctx, CERT_HASH_PROP_ID, None, &mut cb_hash)?;
     let mut hash_buf = vec![0u8; cb_hash as usize];
