@@ -178,6 +178,24 @@ unsafe fn blob_or_raw_der(pv: *mut c_void) -> Option<Vec<u8>> {
     Some(der.to_vec())
 }
 
+fn der_byte_preview_hex(der: &[u8], prefix_octets: usize) -> (usize, String) {
+    let take = der.len().min(prefix_octets);
+    let hex = der[..take]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    (der.len(), hex)
+}
+
+/// OCSP/SCEP/other PKIX blobs often arrive as raw DER `SEQUENCE` bytes — not parseable as cert or CRL.
+fn opaque_der_retrieval_report(der: &[u8]) -> String {
+    let (total, hex) = der_byte_preview_hex(der, 32);
+    let prefix_len = (hex.len() / 2).min(total);
+    format!(
+        "Retrieved object: opaque DER (not X.509 certificate or CRL)\r\n  Size (bytes): {total}\r\n  First {prefix_len} octets (hex): {hex}\r\n"
+    )
+}
+
 unsafe fn report_der_cert_or_crl(der: &[u8]) -> Result<String> {
     let cert = CertCreateCertificateContext(CERT_ENCODING, der);
     if !cert.is_null() {
@@ -224,7 +242,14 @@ fn pkix_ocsp_oid() -> PCSTR {
 }
 
 /// [`CryptRetrieveObjectByUrlA`] with optional object OID hint; frees result appropriately.
-unsafe fn retrieve_one_url(url: &str, timeout_ms: u32, oid: PCSTR) -> Result<String> {
+///
+/// Second return value is **DER payload** length and hex prefix (when the response was decoded from raw
+/// bytes at `pv`), for OCSP diagnostics (`--probe-urls`).
+unsafe fn retrieve_one_url(
+    url: &str,
+    timeout_ms: u32,
+    oid: PCSTR,
+) -> Result<(String, Option<(usize, String)>)> {
     let c_url = CString::new(url).with_context(|| format!("URL contains NUL: {url:?}"))?;
     let mut pv: *mut c_void = std::ptr::null_mut();
 
@@ -257,17 +282,19 @@ unsafe fn retrieve_one_url(url: &str, timeout_ms: u32, oid: PCSTR) -> Result<Str
 
     if let Some(der) = blob_or_raw_der(pv) {
         CryptMemFree(Some(pv));
-        return report_der_cert_or_crl(der.as_slice());
+        let preview = der_byte_preview_hex(der.as_slice(), 32);
+        match report_der_cert_or_crl(der.as_slice()) {
+            Ok(report) => Ok((report, Some(preview))),
+            Err(_) => Ok((opaque_der_retrieval_report(der.as_slice()), Some(preview))),
+        }
+    } else if let Some(s) = try_report_cert_or_crl_context(pv)? {
+        Ok((s, None))
+    } else {
+        CryptMemFree(Some(pv));
+        Err(anyhow!(
+            "CryptRetrieveObjectByUrl returned data we could not decode as DER blob or certificate context"
+        ))
     }
-
-    if let Some(s) = try_report_cert_or_crl_context(pv)? {
-        return Ok(s);
-    }
-
-    CryptMemFree(Some(pv));
-    Err(anyhow!(
-        "CryptRetrieveObjectByUrl returned data we could not decode as DER blob or certificate context"
-    ))
 }
 
 /// One-stop URL retrieval with PKIX CA Issuers hint first (common HTTPS), then auto OID.
@@ -279,7 +306,7 @@ pub fn retrieve_url_report(url: &str, timeout_ms: u32) -> Result<String> {
         // Prefer auto OID first: many HTTPS CA URLs return `CRYPT_INTEGER_BLOB` at `pv` (cbData first).
         // PKIX `szOID_PKIX_CA_ISSUERS` often yields `PCCERT_CONTEXT`, which we handle second.
         match retrieve_one_url(url, timeout_ms, PCSTR::null()) {
-            Ok(s) => {
+            Ok((s, _)) => {
                 out.push_str(&s);
                 Ok(out)
             }
@@ -287,7 +314,7 @@ pub fn retrieve_url_report(url: &str, timeout_ms: u32) -> Result<String> {
                 out.push_str(&format!(
                     "Attempt with default object type: {e_auto}\r\n\r\n"
                 ));
-                let s = retrieve_one_url(url, timeout_ms, szOID_PKIX_CA_ISSUERS)?;
+                let (s, _) = retrieve_one_url(url, timeout_ms, szOID_PKIX_CA_ISSUERS)?;
                 out.push_str(&s);
                 Ok(out)
             }
@@ -356,9 +383,17 @@ fn format_retrieval_probes_for_entries(
         let mut ok = false;
         for (label, oid) in attempts {
             match unsafe { retrieve_one_url(&e.url, timeout_ms, oid) } {
-                Ok(report) => {
+                Ok((report, der_preview)) => {
                     let line = summary_first_line(&report);
                     out.push_str(&format!("    OK ({label}) — {line}\r\n"));
+                    if matches!(e.kind, CertUrlKind::AiaOcsp) {
+                        if let Some((len, hex)) = der_preview {
+                            let n = hex.len() / 2;
+                            out.push_str(&format!(
+                                "    DER payload: {len} byte(s) total; first {n} octet(s) (hex): {hex}\r\n"
+                            ));
+                        }
+                    }
                     ok = true;
                     break;
                 }
@@ -460,6 +495,23 @@ pub fn retrieval_failure_hint_lines() -> String {
 
 fn option_env_present(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::der_byte_preview_hex;
+
+    #[test]
+    fn der_preview_truncates_and_hexes() {
+        let der = [0x30u8, 0x80, 0x01, 0x02, 0x03];
+        let (len, hex) = der_byte_preview_hex(&der, 32);
+        assert_eq!(len, 5);
+        assert_eq!(hex, "3080010203");
+        let short = [0xabu8, 0xcd];
+        let (l2, h2) = der_byte_preview_hex(&short, 1);
+        assert_eq!(l2, 2);
+        assert_eq!(h2, "ab");
+    }
 }
 
 fn url_kind_header(kind: &CertUrlKind) -> &'static str {
