@@ -1,0 +1,24 @@
+/reversing/*.exe
+/reversing/*.dll
+/reversing/*.pdb
+/reversing/*.i64
+/reversing/*.idb
+/reversing/*.til
+/reversing/*.id0
+/reversing/*.id1
+/reversing/*.nam
+/reversing/*.json
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Generated local test certs (may identify environment)
+/tests/fixtures/*.cer
+/tests/fixtures/*.crt
+/tests/fixtures/*.pem
+
+
+# Added by cargo
+
+/target
