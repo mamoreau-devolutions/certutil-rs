@@ -1,0 +1,24 @@
+/.local-reference/*.exe
+/.local-reference/*.dll
+/.local-reference/*.pdb
+/.local-reference/*.i64
+/.local-reference/*.idb
+/.local-reference/*.til
+/.local-reference/*.id0
+/.local-reference/*.id1
+/.local-reference/*.nam
+/.local-reference/*.json
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Generated local test certs (may identify environment)
+/tests/fixtures/*.cer
+/tests/fixtures/*.crt
+/tests/fixtures/*.pem
+
+
+# Added by cargo
+
+/target
